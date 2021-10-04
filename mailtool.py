@@ -2,6 +2,7 @@
 #-*- coding:utf-8 -*-
 
 import imaplib
+#import imaplibext as imaplib
 import mailbox
 from mailbox import _mboxMMDFMessage
 import getpass
@@ -15,10 +16,13 @@ import re
 import pipes
 import sys
 import hashlib
+import datetime
 from imapclient.imap_utf7 import encode as encode_utf7, decode as decode_utf7
 from imapclient.response_parser import parse_response, parse_message_list, parse_fetch_response
+from bloom_filter2 import BloomFilter
 
 _RE_COMBINE_WHITESPACE = re.compile(r"\s+")
+_UID = re.compile(r'(?<=UID )(\d+)')
 
 def parse_imap_value(s):
     print("String: " + s)
@@ -68,6 +72,12 @@ argparser.add_argument('--from-ts', dest='fromts', help='Query messages from', t
 argparser.add_argument('--to-ts', dest='tots', help='Query messages to', type=int, default=False)
 argparser.add_argument('--delete', dest='delete', help='Delete', default=False, action='store_true')
 
+argparser.add_argument('--update', dest='update', help='Update', default=False, action='store_true')
+argparser.add_argument('--bloom-max-elements', dest='bloom_max_elements', help="Maximum number of elements", default=1000000)
+argparser.add_argument('--bloom-reverse-error-rate', dest='bloom_reverse_error_rate', help="Error rate equals 1/reverse_error_rate", default=1000000000)
+
+argparser.add_argument('--use-uids', dest='use_uids', help="Use UIDs", default=False, action='store_true')
+
 args = argparser.parse_args()
 
 # Init
@@ -79,12 +89,12 @@ if args.passrequest2:
     args.password2 = getpass.getpass()
 
 if args.gmail1:
-    args.ssl1 = true
+    args.ssl1 = True
     args.host1 = 'imap.gmail.com'
     args.port1 = 993
 
 if args.gmail2:
-    args.ssl2 = true
+    args.ssl2 = True
     args.host2 = 'imap.gmail.com'
     args.port2 = 993
 
@@ -194,6 +204,12 @@ def message_print(message):
             #    continue
     print()
 
+def message_uid(s):
+    """the global ID for emails"""
+    try:
+        return pattern_uid.findall(s)[0]
+    except:
+        return ""
 
 # Mbox => Mbox
 # Mbox => Imap
@@ -217,7 +233,11 @@ elif args.folders:
         if args.delete:
             imap_delete(imap1)
         else:
-            typ, data = imap1.search(None, 'ALL')
+            if args.use_uids:
+                typ, data = imap1.uid('search', None, 'UID', '1:*')
+            else:
+                # UID 1:* = ALL
+                typ, data = imap1.search(None, 'ALL')
             if args.eml2: # dump emls to folder
                 for num in data[0].split():
                     typ, data = imap1.fetch(num, '(UID RFC822)')
@@ -228,18 +248,56 @@ elif args.folders:
                     f.write(data[uid][b'RFC822'])
                     f.close()
             elif args.mbox2: # dump emls to mbox
-                mbox = mailbox.mbox(args.mbox2)
-                for num in data[0].split():
-                    typ, data = imap1.fetch(num, '(UID RFC822)')
+                # result, data = mail.uid('search', None, "UID", start_message_uid + ':*')
+                # UID SEARCH ALL
+                # UIDPLUS UIDNEXT
+                #mbox = mailbox.mbox(args.mbox2)
+                skip = False
+                split = data[0].split()
+                count = len(split)
+                bloom = BloomFilter(
+                        max_elements=args.bloom_max_elements, 
+                        error_rate=1/args.bloom_reverse_error_rate, 
+                        filename=(f'{args.mbox2}.bloom', -1))
+                for num in split:
+                    if args.update:
+                        typ, data = imap1.fetch(num, '(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])')
+                    else:
+                        typ, data = imap1.fetch(num, '(UID RFC822)')
+                    
+                    for response_part in data:
+                        if isinstance(response_part, tuple):
+                            try:
+                                # process only headers, parse Message-ID and Date
+                                msg_str = email.message_from_string(response_part[1].split(b'\r\n\r\n')[0].decode('utf-8'))
+                                message_id = msg_str.get('Message-ID')
+                                if message_id in bloom:
+                                    skip = True
+                                    break
+                                else:
+                                    print(f'Added message: {message_id}')
+                                    if args.update:
+                                        typ, data = imap1.fetch(num, '(UID RFC822)')
+                                    bloom.add(message_id)
+                                dt = email.utils.parsedate_to_datetime(msg_str.get('Date'))
+                                mbox_name = dt.strftime(args.mbox2)
+                                mbox = mailbox.mbox(mbox_name)
+                            except:
+                                mbox = mailbox.mbox(args.mbox2)
+                                pass
+                    if skip:
+                        skip = False
+                        continue
                     data = parse_fetch_response(data)
                     uid = next(iter(data))
                     if b'RFC822' in data[uid]:
                         message = _mboxMMDFMessage(data[uid][b'RFC822'])
                         mbox.add(message)
+                        mbox.close()
                     else:
                         print("No RFC822 found for: %d" % uid, file=sys.stderr)
                     #message.set_from("%s@%s:%s/%d" % (args.username1, args.host1, folder, uid), time.gmtime())
-                mbox.close()
+                #mbox.close()
             elif args.eml1: # append emls
                 for file in args.eml1:
                     with open(file, "rb") as f:
@@ -251,24 +309,24 @@ elif args.folders:
                 for num in data[0].split():
                     typ, data = imap1.fetch(num, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])')
                     for response_part in data:
-                      if isinstance(response_part, tuple):
-                        msg_str = imap1.message_from_string(response_part[1].decode('utf-8'))
-                        message_id = msg_str.get('Message-ID')
-                        if message_id in queryset:
-                            print("match")
-                            typ, data = imap1.fetch(num, '(RFC822)')
-                            for response_part in data:
-                                if isinstance(response_part, tuple):
-                                    msg_str = imap1.message_from_string(response_part[1].decode('utf-8'))
-                                    for part in msg_str.walk():
-                                        if part.get_content_maintype() == 'multipart':
-                                            continue
-                                        fileName = part.get_filename()
-                                        print("%d %s" % (len(part.get_payload(decode=True)), fileName))
-                                        if part.get('Content-Disposition') is None:
-                                            continue
-                                        if part.get('Content-Disposition') == "inline":
-                                            continue
+                        if isinstance(response_part, tuple):
+                            msg_str = email.message_from_string(response_part[1].decode('utf-8'))
+                            message_id = msg_str.get('Message-ID')
+                            if message_id in queryset:
+                                print("match")
+                                typ, data = imap1.fetch(num, '(RFC822)')
+                                for response_part in data:
+                                    if isinstance(response_part, tuple):
+                                        msg_str = email.message_from_string(response_part[1].decode('utf-8'))
+                                        for part in msg_str.walk():
+                                            if part.get_content_maintype() == 'multipart':
+                                                continue
+                                            fileName = part.get_filename()
+                                            print("%d %s" % (len(part.get_payload(decode=True)), fileName))
+                                            if part.get('Content-Disposition') is None:
+                                                continue
+                                            if part.get('Content-Disposition') == "inline":
+                                                continue
             else:
                 for num in data[0].split():
                     if (args.delete):
@@ -280,9 +338,9 @@ elif args.folders:
                         #(name, size) = parse_imap_value(data[1].decode('utf-8'))
                         for response_part in data:
                           if isinstance(response_part, tuple):
-                            msg_str = imap1.message_from_string(response_part[1].decode('utf-8'))
+                            msg_str = email.message_from_string(response_part[1].decode('utf-8'))
                             try:
-                                timestamp = imap1.utils.parsedate_to_datetime(msg_str.get('Date')).timestamp()
+                                timestamp = email.utils.parsedate_to_datetime(msg_str.get('Date')).timestamp()
                             except:    
                                 timestamp = 0
                             try:
@@ -297,7 +355,8 @@ elif args.folders:
                             #print('%s\t%d\t%s\t%s' % (timestamp, size, message_id, subject))
                             print('%s\t%s\t%s' % (timestamp, message_id, subject))
                     else:
-                        typ, data = imap1.fetch(num, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])')
+                        typ, data = imap1.fetch(num, '(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])')
+                        print(data)
                         for response_part in data:
                           if isinstance(response_part, tuple):
                             msg_str = email.message_from_string(response_part[1].decode('utf-8'))
