@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 #-*- coding:utf-8 -*-
 
-import imaplib
+import imaplib as imaplibbase
 #import imaplibext as imaplib
+import imaplibmailtool as imaplib
 import mailbox
 from mailbox import _mboxMMDFMessage
 import getpass
@@ -17,20 +18,39 @@ import pipes
 import sys
 import hashlib
 import datetime
+import configparser
+from pathlib import Path
 from imapclient.imap_utf7 import encode as encode_utf7, decode as decode_utf7
 from imapclient.response_parser import parse_response, parse_message_list, parse_fetch_response
 from bloom_filter2 import BloomFilter
 
-_RE_COMBINE_WHITESPACE = re.compile(r"\s+")
-_UID = re.compile(r'(?<=UID )(\d+)')
+config = configparser.ConfigParser()
+
+_RE_COMBINE_WHITESPACE = re.compile(r'\s+')
+_RE_IMAP_VALUE = re.compile(r'^[ ](?P<name>.+)[ ](?P<value>.+)\)$')
+_RE_LIST_RESPONSE = re.compile(r'\((?P<flags>.*?)\) "(?P<delimiter>.*)" (?P<name>.*)')
+_RE_UID = re.compile(r'(?<=UID )(\d+)')
+
+def parse_list_response(s):
+    match = _RE_LIST_RESPONSE.match(s)
+    flags, delimiter, mailbox_name = match.groups()
+    mailbox_name = mailbox_name.strip('"')
+    return (set(_RE_COMBINE_WHITESPACE.split(flags)), delimiter, mailbox_name)
 
 def parse_imap_value(s):
+    #s = bytes.decode(s)
     print("String: " + s)
-    pattern = re.compile("^[ ](?P<name>.+)[ ](?P<value>.+)\)$", re.VERBOSE)
-    match = pattern.match(s)
+    match = _RE_IMAP_VALUE.match(s)
     name = match.group("name")
     value = int(match.group("value"))
     return (name, value)
+
+def message_uid(s):
+    """the global ID for emails"""
+    try:
+        return _RE_UID.findall(s)[0]
+    except:
+        return None
 
 pp = pprint.PrettyPrinter(indent=4)
 
@@ -71,14 +91,21 @@ argparser.add_argument('-q', '--query', dest='query', nargs="+", help='Query mes
 argparser.add_argument('--from-ts', dest='fromts', help='Query messages from', type=int, default=False)
 argparser.add_argument('--to-ts', dest='tots', help='Query messages to', type=int, default=False)
 argparser.add_argument('--delete', dest='delete', help='Delete', default=False, action='store_true')
+argparser.add_argument('--expunge', dest='expunge', help='Expunge', default=False, action='store_true')
+argparser.add_argument('--expunge-all', dest='expungeall', help='Expunge', default=False, action='store_true')
 
 argparser.add_argument('--update', dest='update', help='Update', default=False, action='store_true')
 argparser.add_argument('--bloom-max-elements', dest='bloom_max_elements', help="Maximum number of elements", default=1000000)
 argparser.add_argument('--bloom-reverse-error-rate', dest='bloom_reverse_error_rate', help="Error rate equals 1/reverse_error_rate", default=1000000000)
 
-argparser.add_argument('--use-uids', dest='use_uids', help="Use UIDs", default=False, action='store_true')
+#argparser.add_argument('-U', '--uid', dest='uid', help="UID", type=int, default=1)
+#argparser.add_argument('-I', '--inc', dest='inc', help="Incremental update", default=False, action='store_true')
+
+argparser.add_argument('-I', '--use-message-id', dest='use_message_id', help="Use Message-ID", default=False, action='store_true')
+argparser.add_argument('-7', '--utf7', dest='utf7', help="Expect folders encoded in UTF7", default=False, action='store_true')
 
 args = argparser.parse_args()
+
 
 # Init
 
@@ -99,7 +126,7 @@ if args.gmail2:
     args.port2 = 993
 
 if args.debug:
-    imaplib.Debug = 4
+    imaplibbase.Debug = 4
 
 if args.host1:
     if not args.ssl1:
@@ -120,7 +147,7 @@ if args.host2:
     imap2.login(args.username2, args.password2)
     if args.debug:
         print('imap2 capabilities:', imap2.capabilities, file=sys.stderr)
-    
+
 if (args.mbox1):
     mbox1 = mailbox.mbox(args.mbox1)
 
@@ -144,8 +171,20 @@ def imap_delete(imap):
     imap.store("1:*", '+FLAGS', '\\Deleted')
     imap.expunge()
 
+def imap_expunge(imap):
+    if args.expungeall:
+        imap.store("1:*", '+FLAGS', '\\Deleted')
+    imap.expunge()
+
 def imap_select(imap, folder):
-    imap.select("\"" + decode_utf7(folder) + "\"")
+    return imap.select("\"" + (folder if args.utf7 else encode_utf7(folder).decode('utf8')) + "\"")[1][0]
+
+def imap_uidvalidity(imap):
+    return bytes.decode(imap.untagged_responses.get('UIDVALIDITY', [None])[0])
+def imap_uidnext(imap):
+    return bytes.decode(imap.untagged_responses.get('UIDNEXT', [None])[0])
+def imap_recent(imap):
+    return bytes.decode(imap.untagged_responses.get('RECENT', [None])[0])
 
 def imap_append(imap, folder, message, flags = ''):
     imap.append(folder, flags, imaplib.Time2Internaldate(time.time()), message)
@@ -181,7 +220,7 @@ def message_print(message):
 
     #print('%s\t%d\t%s\t%s' % (timestamp, size, message_id, subject))
     print('%s\t%s\t%s' % (timestamp, message_id, subject), end="\t")
-    
+
     if args.extended2:
         for part in message.walk():
             if part.get_content_maintype() == 'multipart':
@@ -204,13 +243,6 @@ def message_print(message):
             #    continue
     print()
 
-def message_uid(s):
-    """the global ID for emails"""
-    try:
-        return pattern_uid.findall(s)[0]
-    except:
-        return ""
-
 # Mbox => Mbox
 # Mbox => Imap
 # Mbox => Print
@@ -228,74 +260,85 @@ if (args.mbox1):
             message_print(message)
 
 elif args.folders:
+    # TODO: if folder * then find all folders
     for folder in args.folders:
-        imap_select(imap1, folder)
+        exists = imap_select(imap1, folder)
+        if args.expunge:
+            imap_expunge(imap1)
         if args.delete:
             imap_delete(imap1)
         else:
-            if args.use_uids:
-                typ, data = imap1.uid('search', None, 'UID', '1:*')
-            else:
-                # UID 1:* = ALL
-                typ, data = imap1.search(None, 'ALL')
-            if args.eml2: # dump emls to folder
-                for num in data[0].split():
-                    typ, data = imap1.fetch(num, '(UID RFC822)')
-                    data = parse_fetch_response(data)
-                    #f = open('%s/%010d.eml' %(args.local_folder, int(num)), 'w')
-                    uid = next(iter(data))
-                    f = open('%s/%s.eml' %(args.eml, uid), 'wb')
-                    f.write(data[uid][b'RFC822'])
-                    f.close()
-            elif args.mbox2: # dump emls to mbox
-                # result, data = mail.uid('search', None, "UID", start_message_uid + ':*')
-                # UID SEARCH ALL
-                # UIDPLUS UIDNEXT
-                #mbox = mailbox.mbox(args.mbox2)
+            uidnext, uidvaliditynext = int(imap_uidnext(imap1)), int(imap_uidvalidity(imap1))
+
+            name = args.mbox2 if args.mbox2 else args.eml2
+            config = configparser.ConfigParser()
+            config['inc'] = {'uid': 1, 'uidvalidity': -1}
+            config_name = f'{name}.ini'
+            config.read(config_name)
+            uid = int(config['inc']['uid'])
+            uidvalidity = int(config['inc']['uidvalidity'])
+
+            # reset uid on uid validity change and fallback to Message-ID
+            if uidvaliditynext != uidvalidity:
+                args.use_message_id = True
+                uid = 1
+
+            if uidnext <= uid: continue
+            typ, data = imap1.uid('search', None, 'UID', f'{uid}:{uidnext-1}')
+            # UID 1:* = ALL
+            #typ, data = imap1.search(None, 'ALL')
+            if args.eml2 or args.mbox2: # dump emls to mbox
                 skip = False
                 split = data[0].split()
-                count = len(split)
                 bloom = BloomFilter(
                         max_elements=args.bloom_max_elements, 
                         error_rate=1/args.bloom_reverse_error_rate, 
-                        filename=(f'{args.mbox2}.bloom', -1))
+                        filename=(f'{name}.bloom', -1))
+
+                incomplete = args.use_message_id and args.update
                 for num in split:
-                    if args.update:
-                        typ, data = imap1.fetch(num, '(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])')
-                    else:
-                        typ, data = imap1.fetch(num, '(UID RFC822)')
-                    
+                    while True:
+                        try:
+                            typ, data = imap1.uid('fetch', num, 
+                                    '(UID BODY.PEEK[HEADER.FIELDS (DATE MESSAGE-ID)])' if incomplete else '(RFC822)')
+                            break
+                        except Exception as e: print(e, file=sys.stderr); continue
                     for response_part in data:
                         if isinstance(response_part, tuple):
                             try:
-                                # process only headers, parse Message-ID and Date
                                 msg_str = email.message_from_string(response_part[1].split(b'\r\n\r\n')[0].decode('utf-8'))
+
                                 message_id = msg_str.get('Message-ID')
-                                if message_id in bloom:
-                                    skip = True
-                                    break
+                                if message_id in bloom and args.use_message_id: skip = True; break
                                 else:
-                                    print(f'Added message: {message_id}')
-                                    if args.update:
-                                        typ, data = imap1.fetch(num, '(UID RFC822)')
+                                    print(f'Added message to bloom filter: {message_id}', file=sys.stderr)
+                                    if incomplete: typ, data = imap1.uid('fetch', num, '(RFC822)')
                                     bloom.add(message_id)
+
                                 dt = email.utils.parsedate_to_datetime(msg_str.get('Date'))
-                                mbox_name = dt.strftime(args.mbox2)
-                                mbox = mailbox.mbox(mbox_name)
-                            except:
-                                mbox = mailbox.mbox(args.mbox2)
-                                pass
-                    if skip:
-                        skip = False
-                        continue
+                                if args.mbox2: mbox = mailbox.mbox(dt.strftime(args.mbox2))
+                            except Exception as e:
+                                print(e, file=sys.stderr);
+                                if args.mbox2: mbox = mailbox.mbox(args.mbox2)
+                    if skip: skip = False; continue
                     data = parse_fetch_response(data)
                     uid = next(iter(data))
                     if b'RFC822' in data[uid]:
-                        message = _mboxMMDFMessage(data[uid][b'RFC822'])
-                        mbox.add(message)
-                        mbox.close()
-                    else:
-                        print("No RFC822 found for: %d" % uid, file=sys.stderr)
+                        rfc822 = data[uid][b'RFC822']
+                        if args.mbox2:
+                            message = _mboxMMDFMessage(rfc822)
+                            mbox.add(message)
+                            mbox.close()
+                        elif args.eml2:
+                            directory = f'{args.eml2}/{uidvaliditynext}/'
+                            Path(directory).mkdir(parents=True, exist_ok=True)
+                            emlfile = open(f'{directory}{uid}.eml', 'wb')
+                            emlfile.write(rfc822)
+                            emlfile.close()
+                        config['inc'] = {'uid': uid+1, 'uidvalidity': uidvaliditynext}
+                        with open(config_name, 'w') as configfile:
+                            config.write(configfile)
+                    else: print("No RFC822 found for: %d" % uid, file=sys.stderr)
                     #message.set_from("%s@%s:%s/%d" % (args.username1, args.host1, folder, uid), time.gmtime())
                 #mbox.close()
             elif args.eml1: # append emls
@@ -355,16 +398,17 @@ elif args.folders:
                             #print('%s\t%d\t%s\t%s' % (timestamp, size, message_id, subject))
                             print('%s\t%s\t%s' % (timestamp, message_id, subject))
                     else:
-                        typ, data = imap1.fetch(num, '(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])')
-                        print(data)
+                        #typ, data = imap1.fetch(num, '(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])')
+                        typ, data = imap1.uid('fetch', num, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])')
                         for response_part in data:
-                          if isinstance(response_part, tuple):
-                            msg_str = email.message_from_string(response_part[1].decode('utf-8'))
-                            try:
-                                message_id = imap1.header.make_header(imap1.header.decode_header(msg_str.get('Message-ID')))
-                            except:
-                                message_id = msg_str.get('Message-ID')
-                            print(message_id);
+                            if isinstance(response_part, tuple):
+                                print(message_uid(response_part[0].decode('utf-8')))
+                                msg_str = email.message_from_string(response_part[1].decode('utf-8'))
+                                try:
+                                    message_id = imap1.header.make_header(imap1.header.decode_header(msg_str.get('Message-ID')))
+                                except:
+                                    message_id = msg_str.get('Message-ID')
+                                print(message_id);
                 if (args.delete):
                     pass
                     #imap1.expunge()
@@ -373,11 +417,15 @@ elif args.host1:
     #imap1.select("Sent")
     #imap1.search("UID", None, "2090:2312")
     #sys.exit()
-    for i in imap1.list(args.list)[1]:
+    # * all, % - children
+    for i in imap1.list(args.list, "*")[1]:
     #for i in imap1.list('(SPECIAL-USE)', '"" "*"')[1]:
     #for i in imap1.list('(SPECIAL-USE)', '"" "*"')[1]:
-        print(i.decode('utf-8'))
-        print(decode_utf7(i))
+        #i.decode().split(' "/" ')
+        if args.utf7:
+            print(parse_list_response(i.decode('utf-8')))
+        else:
+            print(parse_list_response(decode_utf7(i)))
 
 # Cleanup
 
