@@ -74,7 +74,7 @@ argparser.add_argument('--gmail1', dest='gmail1', help="Gmail for host1", defaul
 argparser.add_argument('--eml2', dest='eml2', help="Export eml", default=False)
 argparser.add_argument('--mbox2', dest='mbox2', help="Export mbox", default=False)
 argparser.add_argument('--host2', dest='host2', help="IMAP host for host2", default=False)
-argparser.add_argument('--prot2', dest='port2', help="IMAP port for host2", default=1143)
+argparser.add_argument('--port2', dest='port2', help="IMAP port for host2", default=1143)
 argparser.add_argument('--user2', dest='username2', help="IMAP username for host2", required=False)
 argparser.add_argument('--password2', dest='password2', help="IMAP password for host2", default=False)
 argparser.add_argument('--passfile2', dest='passfile2', help="IMAP password file for host2", default=False)
@@ -187,7 +187,7 @@ def imap_recent(imap):
     return bytes.decode(imap.untagged_responses.get('RECENT', [None])[0])
 
 def imap_append(imap, folder, message, flags = ''):
-    imap.append(folder, flags, imaplib.Time2Internaldate(time.time()), message)
+    imap.append(folder, flags, imaplibbase.Time2Internaldate(time.time()), message)
 
 def mbox_add(mbox, message):
     try:
@@ -246,6 +246,7 @@ def message_print(message):
 # Mbox => Mbox
 # Mbox => Imap
 # Mbox => Print
+
 if (args.mbox1):
     if (args.mbox2):
         for message in mbox1:
@@ -267,6 +268,11 @@ elif args.folders:
             imap_expunge(imap1)
         if args.delete:
             imap_delete(imap1)
+        if args.eml1: # append emls
+            for file in args.eml1:
+                with open(file, "rb") as f:
+                    message = f.read()#.decode('utf-8')
+                    imap_append(imap1, folder, message)
         else:
             uidnext, uidvaliditynext = int(imap_uidnext(imap1)), int(imap_uidvalidity(imap1))
 
@@ -341,11 +347,6 @@ elif args.folders:
                     else: print("No RFC822 found for: %d" % uid, file=sys.stderr)
                     #message.set_from("%s@%s:%s/%d" % (args.username1, args.host1, folder, uid), time.gmtime())
                 #mbox.close()
-            elif args.eml1: # append emls
-                for file in args.eml1:
-                    with open(file, "rb") as f:
-                        data = f.read()#.decode('utf-8')
-                        imap_append(imap1, folder, message)
             elif (args.query):
                 queryset = frozenset(args.query)
                 typ, data = imap1.search(None, 'ALL')
