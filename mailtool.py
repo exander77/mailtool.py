@@ -58,7 +58,7 @@ argparser = argparse.ArgumentParser(description="imaptool.py - Email IMAP tool f
 
 argparser.add_argument('--dry', dest='dry', help="Dry run", default=False, action='store_true')
 argparser.add_argument('--debug', dest='debug', help="Debug output", default=False, action='store_true')
-argparser.add_argument('--showpasswords', dest='showpassowords', help="Dry run", default=False, action='store_true')
+argparser.add_argument('--showpasswords', dest='showpassowords', help="Show passwords in log and stdout", default=False, action='store_true')
 
 argparser.add_argument('-a', '--eml1', dest='eml1', nargs="+", help='Append emls')
 argparser.add_argument('-m', '--mbox1', dest='mbox1', help="File location of mbox1", default=False)
@@ -92,7 +92,7 @@ argparser.add_argument('--from-ts', dest='fromts', help='Query messages from', t
 argparser.add_argument('--to-ts', dest='tots', help='Query messages to', type=int, default=False)
 argparser.add_argument('--delete', dest='delete', help='Delete', default=False, action='store_true')
 argparser.add_argument('--expunge', dest='expunge', help='Expunge', default=False, action='store_true')
-argparser.add_argument('--expunge-all', dest='expungeall', help='Expunge', default=False, action='store_true')
+argparser.add_argument('--expunge-all', dest='expungeall', help='Expunge (add \\\\Deleted)', default=False, action='store_true')
 
 argparser.add_argument('--update', dest='update', help='Update', default=False, action='store_true')
 argparser.add_argument('--bloom-max-elements', dest='bloom_max_elements', help="Maximum number of elements", default=1000000)
