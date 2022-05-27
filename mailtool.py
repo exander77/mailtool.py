@@ -274,7 +274,8 @@ elif args.folders:
                     message = f.read()#.decode('utf-8')
                     imap_append(imap1, folder, message)
         else:
-            uidnext, uidvaliditynext = int(imap_uidnext(imap1)), int(imap_uidvalidity(imap1))
+            uidnext = int(imap_uidnext(imap1))
+            uidvaliditynext = int(imap_uidvalidity(imap1))
 
             name = args.mbox2 if args.mbox2 else args.eml2
             config = configparser.ConfigParser()
