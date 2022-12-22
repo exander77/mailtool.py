@@ -13,6 +13,7 @@ argparser.add_argument('--from', '-f', dest='fromAddr', help="From", default=Fal
 argparser.add_argument('--to', '-t', dest='toAddr', help="To", default=False)
 argparser.add_argument('file', help="File with message")
 argparser.add_argument('--debug', dest='debug', help="Print message", default=False, action='store_true')
+argparser.add_argument('--no-tls', dest='tls', help="Use STARTTLS", default=True, action='store_false')
 args = argparser.parse_args()
 
 with open(args.file, "rb") as f:
@@ -27,7 +28,8 @@ with open(args.file, "rb") as f:
         print(msg)
 
     server = smtplib.SMTP(args.host, args.port)
-    server.starttls()
+    if args.tls:
+        server.starttls()
     server.login(args.username, args.password)
 
     if args.debug:
