@@ -187,7 +187,7 @@ def imap_recent(imap):
     return bytes.decode(imap.untagged_responses.get('RECENT', [None])[0])
 
 def imap_append(imap, folder, message, flags = ''):
-    imap.append(folder, flags, imaplibbase.Time2Internaldate(time.time()), message.as_string().encode('utf-8'))
+    imap.append(folder, flags, imaplibbase.Time2Internaldate(time.time()), message)
 
 def mbox_add(mbox, message):
     try:
@@ -255,7 +255,7 @@ if (args.mbox1):
         if len(args.folders) != 1:
             sys.exit("A single target folder needed!")
         for message in mbox1:
-            imap_append(imap1, args.folders[0], message)
+            imap_append(imap1, args.folders[0], message.as_string().encode('utf-8'))
     else:
         for message in mbox1:
             message_print(message)
