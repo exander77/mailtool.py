@@ -4,6 +4,7 @@
 import imaplib as imaplibbase
 #import imaplibext as imaplib
 import imaplibmailtool as imaplib
+_MAXLINE = 1000000
 import mailbox
 from mailbox import _mboxMMDFMessage
 import getpass
@@ -255,8 +256,9 @@ if (args.mbox1):
     elif (args.host1):
         if len(args.folders) != 1:
             sys.exit("A single target folder needed!")
+        error = False
         for message in mbox1:
-            imap_append(imap1, args.folders[0], message.as_string().encode('utf-8'))
+            imap_append(imap1, args.folders[0], message.as_string().encode('utf-8', errors='surrogatepass'))
     else:
         for message in mbox1:
             message_print(message)
